@@ -35,9 +35,9 @@ type OpenTab = {
 }
 
 type MenuDropdown = 'file' | 'edit' | null
-type ContextMenuTarget = 
+type ContextMenuTarget =
   | { type: 'file'; path: string; name: string }
-  | { type: 'folder'; path: string; name: string }
+  | { type: 'folder'; path: string; name: string; expanded?: boolean }
   | { type: 'editor' }
   | null
 
@@ -54,6 +54,9 @@ function App() {
   const [showCloseDialog, setShowCloseDialog] = useState(false)
   const [closeDialogTarget, setCloseDialogTarget] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: ContextMenuTarget } | null>(null)
+  const [pendingProjectPath, setPendingProjectPath] = useState<string | null>(null)
+  const [pendingProjectCreate, setPendingProjectCreate] = useState(false)
+  const [showProjectSwitchDialog, setShowProjectSwitchDialog] = useState(false)
 
   const loadFileTree = useCallback(async (path: string) => {
     try {
@@ -71,55 +74,47 @@ function App() {
     }
   }, [])
 
+  const loadFolderChildren = useCallback(async (path: string) => {
+    try {
+      const entries = await invoke<any[]>('read_dir', { path })
+      const children: FileNode[] = entries.map((entry) => ({
+        name: entry.name,
+        path: entry.path,
+        kind: entry.is_dir ? 'folder' : 'file',
+        expanded: false,
+        selected: false,
+      }))
+      const updateChildren = (nodes: FileNode[]): FileNode[] =>
+        nodes.map((n) =>
+          n.path === path
+            ? { ...n, children }
+            : n.children
+              ? { ...n, children: updateChildren(n.children) }
+              : n
+        )
+      setFileTree(updateChildren)
+    } catch (e) {
+      console.error('Failed to load children:', e)
+    }
+  }, [])
+
   const toggleFolder = useCallback((node: FileNode) => {
     if (node.kind !== 'folder') return
-    const toggleNode = (nodes: FileNode[]): FileNode[] => {
-      return nodes.map((n) => {
+    const update = (nodes: FileNode[]): FileNode[] =>
+      nodes.map((n) => {
         if (n.path === node.path) {
-          const updated = { ...n, expanded: !n.expanded }
-          if (updated.expanded && (!n.children || n.children.length === 0)) {
-            loadFileTree(n.path).then(() => {
-              const loadChildren = async () => {
-                try {
-                  const entries = await invoke<any[]>('read_dir', { path: n.path })
-                  const children: FileNode[] = entries.map((entry) => ({
-                    name: entry.name,
-                    path: entry.path,
-                    kind: entry.is_dir ? 'folder' : 'file',
-                    expanded: false,
-                    selected: false,
-                  }))
-                  setFileTree((prev) => {
-                    const updateChildren = (nodes: FileNode[]): FileNode[] => {
-                      return nodes.map((nn) => {
-                        if (nn.path === n.path) {
-                          return { ...nn, children }
-                        }
-                        if (nn.children) {
-                          return { ...nn, children: updateChildren(nn.children) }
-                        }
-                        return nn
-                      })
-                    }
-                    return updateChildren(prev)
-                  })
-                } catch (e) {
-                  console.error('Failed to load children:', e)
-                }
-              }
-              loadChildren()
-            })
-          }
-          return updated
+          return { ...n, expanded: !n.expanded }
         }
         if (n.children) {
-          return { ...n, children: toggleNode(n.children) }
+          return { ...n, children: update(n.children) }
         }
         return n
       })
+    setFileTree(update)
+    if (!node.expanded && (!node.children || node.children.length === 0)) {
+      loadFolderChildren(node.path)
     }
-    setFileTree(toggleNode)
-  }, [loadFileTree])
+  }, [loadFolderChildren])
 
   const openFile = useCallback(async (path: string) => {
     try {
@@ -138,13 +133,7 @@ function App() {
     }
   }, [openTabs])
 
-  const closeTab = useCallback((path: string) => {
-    const tab = openTabs.find((t) => t.path === path)
-    if (tab?.dirty) {
-      setCloseDialogTarget(path)
-      setShowCloseDialog(true)
-      return
-    }
+  const removeTab = useCallback((path: string) => {
     setOpenTabs((prev) => {
       const filtered = prev.filter((t) => t.path !== path)
       if (activeTab === path) {
@@ -152,7 +141,17 @@ function App() {
       }
       return filtered
     })
-  }, [openTabs, activeTab])
+  }, [activeTab])
+
+  const closeTab = useCallback((path: string) => {
+    const tab = openTabs.find((t) => t.path === path)
+    if (tab?.dirty) {
+      setCloseDialogTarget(path)
+      setShowCloseDialog(true)
+      return
+    }
+    removeTab(path)
+  }, [openTabs, removeTab])
 
   const saveFile = useCallback(async (tab: OpenTab) => {
     try {
@@ -196,36 +195,82 @@ function App() {
     }
   }, [openTabs, saveFile])
 
+  const applyProject = useCallback((dirPath: string) => {
+    setProjectPath(dirPath)
+    setOpenTabs([])
+    setActiveTab(null)
+    setContextMenu(null)
+    loadFileTree(dirPath)
+  }, [loadFileTree])
+
+  const confirmProjectSwitch = useCallback(async (saveFirst: boolean, dirPath?: string, create = false) => {
+    const target = dirPath ?? pendingProjectPath
+    const shouldCreate = dirPath ? create : pendingProjectCreate
+    if (saveFirst) {
+      await saveAll()
+    }
+    if (target) {
+      if (shouldCreate) {
+        await invoke('create_dir_all', { path: target })
+      }
+      applyProject(target)
+    }
+    setShowProjectSwitchDialog(false)
+    setPendingProjectPath(null)
+    setPendingProjectCreate(false)
+  }, [pendingProjectPath, pendingProjectCreate, saveAll, applyProject])
+
+  const requestProjectSwitch = useCallback((dirPath: string | null, create = false) => {
+    if (!dirPath) return
+    if (dirPath === projectPath) {
+      loadFileTree(dirPath)
+      return
+    }
+    if (openTabs.some((t) => t.dirty)) {
+      setPendingProjectPath(dirPath)
+      setPendingProjectCreate(create)
+      setShowProjectSwitchDialog(true)
+    } else {
+      confirmProjectSwitch(false, dirPath, create)
+    }
+  }, [projectPath, openTabs, loadFileTree, confirmProjectSwitch])
+
   const handleNewProject = useCallback(async () => {
     if (!newProjectName.trim()) return
     try {
-      const dirPath = await invoke<string | null>('pick_save_file', {
-        defaultName: newProjectName,
-        directory: null,
-      })
-      if (dirPath) {
-        await invoke('create_dir_all', { path: dirPath })
-        setProjectPath(dirPath)
-        await loadFileTree(dirPath)
-        setShowNewProjectDialog(false)
-        setNewProjectName('')
-      }
+      const parentDir = await invoke<string | null>('pick_folder')
+      if (!parentDir) return
+      const dirPath = `${parentDir.replace(/[/\\]+$/, '')}/${newProjectName.trim()}`
+      setShowNewProjectDialog(false)
+      setNewProjectName('')
+      requestProjectSwitch(dirPath, true)
     } catch (e) {
       console.error('Failed to create project:', e)
     }
-  }, [newProjectName, loadFileTree])
+  }, [newProjectName, requestProjectSwitch])
 
   const handleOpenProject = useCallback(async () => {
     try {
       const dirPath = await invoke<string | null>('pick_folder')
-      if (dirPath) {
-        setProjectPath(dirPath)
-        await loadFileTree(dirPath)
-      }
+      requestProjectSwitch(dirPath)
     } catch (e) {
       console.error('Failed to open project:', e)
     }
-  }, [loadFileTree])
+  }, [requestProjectSwitch])
+
+  const handleConfirmProjectSwitch = useCallback(() => {
+    confirmProjectSwitch(false)
+  }, [confirmProjectSwitch])
+
+  const handleSaveAllAndSwitch = useCallback(() => {
+    confirmProjectSwitch(true)
+  }, [confirmProjectSwitch])
+
+  const handleCancelProjectSwitch = useCallback(() => {
+    setShowProjectSwitchDialog(false)
+    setPendingProjectPath(null)
+    setPendingProjectCreate(false)
+  }, [])
 
   const handleNewFile = useCallback(async () => {
     if (!projectPath) {
@@ -267,17 +312,23 @@ function App() {
 
   const handleConfirmClose = useCallback(() => {
     if (closeDialogTarget) {
-      setOpenTabs((prev) => {
-        const filtered = prev.filter((t) => t.path !== closeDialogTarget)
-        if (activeTab === closeDialogTarget) {
-          setActiveTab(filtered.length > 0 ? filtered[filtered.length - 1].path : null)
-        }
-        return filtered
-      })
+      removeTab(closeDialogTarget)
     }
     setShowCloseDialog(false)
     setCloseDialogTarget(null)
-  }, [closeDialogTarget, activeTab])
+  }, [closeDialogTarget, removeTab])
+
+  const handleSaveAndClose = useCallback(async () => {
+    const tab = openTabs.find((t) => t.path === closeDialogTarget)
+    if (tab) {
+      await saveFile(tab)
+    }
+    if (closeDialogTarget) {
+      removeTab(closeDialogTarget)
+    }
+    setShowCloseDialog(false)
+    setCloseDialogTarget(null)
+  }, [closeDialogTarget, openTabs, saveFile, removeTab])
 
   const handleCancelClose = useCallback(() => {
     setShowCloseDialog(false)
@@ -290,7 +341,9 @@ function App() {
     setContextMenu({
       x: e.clientX,
       y: e.clientY,
-      target: { type: node.kind, path: node.path, name: node.name }
+      target: node.kind === 'folder'
+        ? { type: 'folder', path: node.path, name: node.name, expanded: node.expanded }
+        : { type: 'file', path: node.path, name: node.name }
     })
   }, [])
 
@@ -677,6 +730,34 @@ function App() {
         </div>
       )}
 
+      {/* Project Switch Dialog */}
+      {showProjectSwitchDialog && (
+        <div className="dialog-overlay" onClick={handleCancelProjectSwitch}>
+          <div className="dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="dialog-header">
+              <h3>Unsaved Changes</h3>
+              <button className="dialog-close" onClick={handleCancelProjectSwitch}>
+                <X size={16} />
+              </button>
+            </div>
+            <div className="dialog-body">
+              <p>You have unsaved changes. Switching projects will close all open files.</p>
+            </div>
+            <div className="dialog-footer">
+              <button className="btn-secondary" onClick={handleCancelProjectSwitch}>
+                Cancel
+              </button>
+              <button className="btn-secondary" onClick={handleConfirmProjectSwitch}>
+                Discard &amp; Switch
+              </button>
+              <button className="btn-primary" onClick={handleSaveAllAndSwitch}>
+                Save All &amp; Switch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Close Tab Dialog */}
       {showCloseDialog && (
         <div className="dialog-overlay" onClick={handleCancelClose}>
@@ -688,14 +769,17 @@ function App() {
               </button>
             </div>
             <div className="dialog-body">
-              <p>This file has unsaved changes. Close anyway?</p>
+              <p>This file has unsaved changes. What would you like to do?</p>
             </div>
             <div className="dialog-footer">
               <button className="btn-secondary" onClick={handleCancelClose}>
                 Cancel
               </button>
-              <button className="btn-primary" onClick={handleConfirmClose}>
-                Close
+              <button className="btn-secondary" onClick={handleConfirmClose}>
+                Don't Save
+              </button>
+              <button className="btn-primary" onClick={handleSaveAndClose}>
+                Save
               </button>
             </div>
           </div>
@@ -726,7 +810,7 @@ function App() {
           {contextMenu.target?.type === 'folder' && (
             <>
               <div className="context-menu-item" onClick={() => toggleFolder({ kind: 'folder', path: (contextMenu.target as any).path, name: (contextMenu.target as any).name })}>
-                {fileTree.find(n => n.path === (contextMenu.target as any).path)?.expanded ? 'Collapse' : 'Expand'}
+                {(contextMenu.target as { expanded?: boolean }).expanded ? 'Collapse' : 'Expand'}
               </div>
               <div className="context-menu-item" onClick={() => handleRenameFile((contextMenu.target as any).path, (contextMenu.target as any).name)}>
                 Rename

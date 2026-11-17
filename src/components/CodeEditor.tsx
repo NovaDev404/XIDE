@@ -142,7 +142,7 @@ export function CodeEditor({ value, onChange, onCursor, extensions = [], filePat
     })
   }, [languageExtension])
 
-  const prevFilePathRef = useRef<string | undefined>()
+  const prevFilePathRef = useRef<string | undefined>(undefined)
   useEffect(() => {
     const view = viewRef.current
     if (!view) return

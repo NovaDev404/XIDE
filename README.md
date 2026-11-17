@@ -8,7 +8,7 @@
 </div>
 
 ## Features
-- [ ] Xcode-like IDE design
+- [x] Xcode-like IDE design
 - [ ] Error checking, suggestions, and debugging
 - [ ] Build/compile apps with xtool
 - [ ] Install apps directly to device
