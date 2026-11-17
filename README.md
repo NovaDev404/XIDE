@@ -17,6 +17,16 @@
 - [ ] Import xcodeproj apps
 - [ ] iOS device log
 
+## Getting started
+
+Requires [Node.js](https://nodejs.org) and the [Rust toolchain](https://rustup.rs).
+
+```sh
+npm install
+npm run tauri:dev    # run the app in dev mode
+npm run tauri:build  # build a release bundle
+```
+
 ## Built with
 - Tauri + React
 - xtool

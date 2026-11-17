@@ -1,0 +1,16 @@
+# External tools XIDE shells out to.
+# Paths are resolved at runtime; empty means "find on PATH".
+# These are placeholders - nothing consumes this file yet.
+
+[sourcekit-lsp]
+# Binary providing Swift language features (completion, diagnostics, etc.)
+# Ships with the Swift toolchain, or: https://www.swift.org
+path = ""
+
+[isideload]
+# Tool used to install .ipa files onto iOS devices
+path = ""
+
+[xtool]
+# Builds/compiles apps (see https://github.com/xtool-org/xtool)
+path = ""
