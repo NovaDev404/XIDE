@@ -18,7 +18,9 @@ struct AppSettings {
 
 // Global process storage
 type ProcessMap = Arc<Mutex<Option<tokio::process::Child>>>;
+type StdinMap = Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>;
 static CURRENT_PROCESS: std::sync::OnceLock<ProcessMap> = std::sync::OnceLock::new();
+static CURRENT_STDIN: std::sync::OnceLock<StdinMap> = std::sync::OnceLock::new();
 
 #[tauri::command]
 fn read_dir(path: String) -> Result<Vec<DirEntry>, String> {
@@ -210,26 +212,30 @@ async fn start_terminal(project_path: String, app: tauri::AppHandle) -> Result<(
     stop_terminal().await?;
 
     let process_map = CURRENT_PROCESS.get_or_init(|| Arc::new(Mutex::new(None)));
+    let stdin_map = CURRENT_STDIN.get_or_init(|| Arc::new(tokio::sync::Mutex::new(None)));
 
     let (cmd, args) = if cfg!(target_os = "windows") {
-        ("wsl", vec!["bash", "-lic", "xtool dev build --ipa"])
+        ("wsl", vec!["bash", "-li"])
     } else {
-        ("xtool", vec!["dev", "build", "--ipa"])
+        ("bash", vec!["-li"])
     };
 
     let mut child = tokio::process::Command::new(cmd)
         .args(&args)
         .current_dir(&project_path)
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
 
+    let stdin = child.stdin.take().ok_or("Failed to capture stdin")?;
     let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
     let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
 
-    // Store the process
+    // Store the process and stdin
     *process_map.lock().unwrap() = Some(child);
+    *stdin_map.lock().await = Some(stdin);
 
     // Spawn tasks to read and emit output
     let app_clone = app.clone();
@@ -239,8 +245,9 @@ async fn start_terminal(project_path: String, app: tauri::AppHandle) -> Result<(
         let mut lines = reader.lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
+            let clean_line = strip_ansi_codes(&line);
             let _ = app_clone.emit("terminal-output", serde_json::json!({
-                "line": line,
+                "line": clean_line,
                 "type": "stdout"
             }));
         }
@@ -253,8 +260,9 @@ async fn start_terminal(project_path: String, app: tauri::AppHandle) -> Result<(
         let mut lines = reader.lines();
 
         while let Ok(Some(line)) = lines.next_line().await {
+            let clean_line = strip_ansi_codes(&line);
             let _ = app_clone.emit("terminal-output", serde_json::json!({
-                "line": line,
+                "line": clean_line,
                 "type": "stderr"
             }));
         }
@@ -262,13 +270,41 @@ async fn start_terminal(project_path: String, app: tauri::AppHandle) -> Result<(
 
     // Handle process completion
     let process_map_clone = process_map.clone();
+    let stdin_map_clone = stdin_map.clone();
     tokio::spawn(async move {
         let _ = tokio::join!(stdout_task, stderr_task);
         *process_map_clone.lock().unwrap() = None;
+        *stdin_map_clone.lock().await = None;
         let _ = app.emit("terminal-exited", ());
     });
 
     Ok(())
+}
+
+#[tauri::command]
+async fn send_terminal_command(command: String) -> Result<(), String> {
+    if let Some(stdin_map) = CURRENT_STDIN.get() {
+        let stdin = {
+            let mut guard = stdin_map.lock().await;
+            guard.take()
+        };
+        if let Some(mut stdin) = stdin {
+            use tokio::io::AsyncWriteExt;
+            let cmd_with_newline = format!("{}\n", command);
+            stdin.write_all(cmd_with_newline.as_bytes()).await.map_err(|e| e.to_string())?;
+            stdin.flush().await.map_err(|e| e.to_string())?;
+            // Put stdin back
+            let mut guard = stdin_map.lock().await;
+            *guard = Some(stdin);
+        }
+    }
+    Ok(())
+}
+
+fn strip_ansi_codes(input: &str) -> String {
+    // Remove ANSI escape sequences
+    let re = regex::Regex::new(r"\x1b\[[0-9;]*[mK]").unwrap();
+    re.replace_all(input, "").to_string()
 }
 
 #[tauri::command]
@@ -281,6 +317,10 @@ async fn stop_terminal() -> Result<(), String> {
         if let Some(mut child) = child {
             child.kill().await.map_err(|e| e.to_string())?;
         }
+    }
+    if let Some(stdin_map) = CURRENT_STDIN.get() {
+        let mut guard = stdin_map.lock().await;
+        *guard = None;
     }
     Ok(())
 }
@@ -306,6 +346,7 @@ pub fn run() {
             load_last_project_path,
             start_terminal,
             stop_terminal,
+            send_terminal_command,
         ])
         .run(tauri::generate_context!())
         .expect("error while running XIDE");

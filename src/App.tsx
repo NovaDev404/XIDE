@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { CodeEditor } from './components/CodeEditor'
-import { invoke, listen } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import {
   ChevronLeft,
   ChevronRight,
@@ -60,10 +61,10 @@ function App() {
   const [pendingProjectCreate, setPendingProjectCreate] = useState(false)
   const [showProjectSwitchDialog, setShowProjectSwitchDialog] = useState(false)
   const [isCreatingProject, setIsCreatingProject] = useState(false)
-  const [showTerminal, setShowTerminal] = useState(false)
   const [terminalOutput, setTerminalOutput] = useState<string[]>([])
   const [isTerminalRunning, setIsTerminalRunning] = useState(false)
   const [buildStatus, setBuildStatus] = useState<'idle' | 'building' | 'completed' | 'failed'>('idle')
+  const [terminalInput, setTerminalInput] = useState('')
 
   const loadFileTree = useCallback(async (path: string) => {
     try {
@@ -111,6 +112,14 @@ function App() {
         console.error('Failed to save last project path:', e)
       })
     }
+  }, [projectPath])
+
+  // Start terminal when project is opened
+  useEffect(() => {
+    if (projectPath && !isTerminalRunning) {
+      handleStartTerminal()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectPath])
 
   const loadFolderChildren = useCallback(async (path: string) => {
@@ -503,8 +512,6 @@ function App() {
     try {
       await invoke('start_terminal', { projectPath })
       setIsTerminalRunning(true)
-      setBuildStatus('building')
-      setShowTerminal(true)
     } catch (e) {
       console.error('Failed to start terminal:', e)
     }
@@ -517,6 +524,29 @@ function App() {
       setBuildStatus('idle')
     } catch (e) {
       console.error('Failed to stop terminal:', e)
+    }
+  }, [])
+
+  const handleSendCommand = useCallback(async () => {
+    if (!terminalInput.trim()) return
+    try {
+      await invoke('send_terminal_command', { command: terminalInput })
+      setTerminalOutput((prev) => [...prev, `$ ${terminalInput}`])
+      setTerminalInput('')
+    } catch (e) {
+      console.error('Failed to send command:', e)
+    }
+  }, [terminalInput])
+
+  const handleBuild = useCallback(async () => {
+    const buildCmd = 'xtool dev build --ipa'
+    setTerminalOutput((prev) => [...prev, `$ ${buildCmd}`])
+    setBuildStatus('building')
+    try {
+      await invoke('send_terminal_command', { command: buildCmd })
+    } catch (e) {
+      console.error('Failed to send build command:', e)
+      setBuildStatus('failed')
     }
   }, [])
 
@@ -697,11 +727,8 @@ function App() {
           Product
           {menuDropdown === 'product' && (
             <div className="menu-dropdown">
-              <div className="menu-dropdown-item" onClick={handleStartTerminal}>
+              <div className="menu-dropdown-item" onClick={handleBuild}>
                 Build
-              </div>
-              <div className="menu-dropdown-item" onClick={() => setShowTerminal(!showTerminal)}>
-                Toggle Terminal
               </div>
             </div>
           )}
@@ -723,14 +750,14 @@ function App() {
           <div className="separator"></div>
           <button
             className="toolbar-btn run-btn"
-            onClick={isTerminalRunning ? null : handleStartTerminal}
-            disabled={!projectPath || isTerminalRunning}
+            onClick={handleBuild}
+            disabled={!projectPath || !isTerminalRunning}
           >
             <Play size={14} />
           </button>
           <button
             className="toolbar-btn stop-btn"
-            onClick={isTerminalRunning ? handleStopTerminal : null}
+            onClick={handleStopTerminal}
             disabled={!isTerminalRunning}
           >
             <Square size={14} />
@@ -750,7 +777,6 @@ function App() {
         </div>
         <div className="toolbar-right">
           <button className="toolbar-btn" onClick={handleOpenProject}><Folder size={16} /></button>
-          <button className="toolbar-btn" onClick={() => setShowTerminal(!showTerminal)}><Terminal size={16} /></button>
           <button className="toolbar-btn"><Search size={16} /></button>
           <button className="toolbar-btn"><Settings size={16} /></button>
         </div>
@@ -865,26 +891,37 @@ function App() {
       </div>
 
       {/* Terminal Panel */}
-      {showTerminal && (
-        <div className="terminal-panel">
-          <div className="terminal-header">
-            <span className="terminal-title">Terminal</span>
-            <button className="terminal-close" onClick={() => setShowTerminal(false)}>
-              <X size={14} />
-            </button>
-          </div>
-          <div className="terminal-content">
-            {terminalOutput.length === 0 && (
-              <div className="terminal-empty">Terminal ready. Click Build to start.</div>
-            )}
-            {terminalOutput.map((line, index) => (
-              <div key={index} className="terminal-line">
-                {line}
-              </div>
-            ))}
-          </div>
+      <div className="terminal-panel">
+        <div className="terminal-header">
+          <span className="terminal-title">Terminal</span>
         </div>
-      )}
+        <div className="terminal-content">
+          {terminalOutput.length === 0 && (
+            <div className="terminal-empty">Terminal ready.</div>
+          )}
+          {terminalOutput.map((line, index) => (
+            <div key={index} className="terminal-line">
+              {line}
+            </div>
+          ))}
+        </div>
+        <div className="terminal-input-container">
+          <span className="terminal-prompt">$</span>
+          <input
+            type="text"
+            className="terminal-input"
+            value={terminalInput}
+            onChange={(e) => setTerminalInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                handleSendCommand()
+              }
+            }}
+            placeholder="Enter command..."
+            disabled={!isTerminalRunning}
+          />
+        </div>
+      </div>
 
       {/* New Project Dialog */}
       {showNewProjectDialog && (
