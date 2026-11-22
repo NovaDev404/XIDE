@@ -237,6 +237,7 @@ body {
   flex: 1;
   display: flex;
   overflow: hidden;
+  transition: height 0.2s ease;
 }
 
 /* Sidebar */
@@ -611,6 +612,23 @@ body {
   border-color: #007aff;
 }
 
+.dialog-body input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.hint-text {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--sidebar-text-muted);
+}
+
+.error-text {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #ff3b30;
+}
+
 .dialog-footer {
   display: flex;
   justify-content: flex-end;
@@ -638,6 +656,11 @@ body {
   background: #0062cc;
 }
 
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .btn-secondary {
   background: var(--file-hover);
   color: var(--sidebar-text);
@@ -645,6 +668,16 @@ body {
 
 .btn-secondary:hover {
   background: var(--file-selected);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.toolbar-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 /* Empty States */
@@ -686,4 +719,72 @@ body {
   height: 1px;
   background: var(--border-color);
   margin: 4px 0;
+}
+
+/* Terminal Panel */
+.terminal-panel {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 200px;
+  background: var(--sidebar-bg);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  z-index: 100;
+}
+
+.terminal-header {
+  height: 28px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--toolbar-bg);
+}
+
+.terminal-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--sidebar-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.terminal-close {
+  background: transparent;
+  border: none;
+  color: var(--sidebar-text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+}
+
+.terminal-close:hover {
+  background: var(--file-hover);
+  color: var(--sidebar-text);
+}
+
+.terminal-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  font-family: 'SF Mono', 'Monaco', 'Menlo', monospace;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.terminal-empty {
+  color: var(--sidebar-text-muted);
+  font-style: italic;
+}
+
+.terminal-line {
+  color: var(--sidebar-text);
+  white-space: pre-wrap;
+  word-break: break-all;
 }

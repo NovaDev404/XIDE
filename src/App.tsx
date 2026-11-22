@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { CodeEditor } from './components/CodeEditor'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, listen } from '@tauri-apps/api/core'
 import {
   ChevronLeft,
   ChevronRight,
@@ -15,6 +15,7 @@ import {
   Sun,
   X,
   Plus,
+  Terminal,
 } from 'lucide-react'
 import './App.css'
 
@@ -34,7 +35,7 @@ type OpenTab = {
   dirty: boolean
 }
 
-type MenuDropdown = 'file' | 'edit' | null
+type MenuDropdown = 'file' | 'edit' | 'product' | null
 type ContextMenuTarget =
   | { type: 'file'; path: string; name: string }
   | { type: 'folder'; path: string; name: string; expanded?: boolean }
@@ -51,12 +52,18 @@ function App() {
   const [menuDropdown, setMenuDropdown] = useState<MenuDropdown>(null)
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
+  const [newProjectError, setNewProjectError] = useState('')
   const [showCloseDialog, setShowCloseDialog] = useState(false)
   const [closeDialogTarget, setCloseDialogTarget] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; target: ContextMenuTarget } | null>(null)
   const [pendingProjectPath, setPendingProjectPath] = useState<string | null>(null)
   const [pendingProjectCreate, setPendingProjectCreate] = useState(false)
   const [showProjectSwitchDialog, setShowProjectSwitchDialog] = useState(false)
+  const [isCreatingProject, setIsCreatingProject] = useState(false)
+  const [showTerminal, setShowTerminal] = useState(false)
+  const [terminalOutput, setTerminalOutput] = useState<string[]>([])
+  const [isTerminalRunning, setIsTerminalRunning] = useState(false)
+  const [buildStatus, setBuildStatus] = useState<'idle' | 'building' | 'completed' | 'failed'>('idle')
 
   const loadFileTree = useCallback(async (path: string) => {
     try {
@@ -73,6 +80,38 @@ function App() {
       console.error('Failed to load file tree:', e)
     }
   }, [])
+
+  const applyProject = useCallback((dirPath: string) => {
+    setProjectPath(dirPath)
+    setOpenTabs([])
+    setActiveTab(null)
+    setContextMenu(null)
+    loadFileTree(dirPath)
+  }, [loadFileTree])
+
+  // Load last project on startup
+  useEffect(() => {
+    const loadLastProject = async () => {
+      try {
+        const lastPath = await invoke<string | null>('load_last_project_path')
+        if (lastPath) {
+          applyProject(lastPath)
+        }
+      } catch (e) {
+        console.error('Failed to load last project:', e)
+      }
+    }
+    loadLastProject()
+  }, [applyProject])
+
+  // Save project path whenever it changes
+  useEffect(() => {
+    if (projectPath) {
+      invoke('save_last_project_path', { path: projectPath }).catch((e) => {
+        console.error('Failed to save last project path:', e)
+      })
+    }
+  }, [projectPath])
 
   const loadFolderChildren = useCallback(async (path: string) => {
     try {
@@ -195,14 +234,6 @@ function App() {
     }
   }, [openTabs, saveFile])
 
-  const applyProject = useCallback((dirPath: string) => {
-    setProjectPath(dirPath)
-    setOpenTabs([])
-    setActiveTab(null)
-    setContextMenu(null)
-    loadFileTree(dirPath)
-  }, [loadFileTree])
-
   const confirmProjectSwitch = useCallback(async (saveFirst: boolean, dirPath?: string, create = false) => {
     const target = dirPath ?? pendingProjectPath
     const shouldCreate = dirPath ? create : pendingProjectCreate
@@ -236,18 +267,68 @@ function App() {
   }, [projectPath, openTabs, loadFileTree, confirmProjectSwitch])
 
   const handleNewProject = useCallback(async () => {
-    if (!newProjectName.trim()) return
+    // Prevent double submission
+    if (isCreatingProject) return
+
+    // Validate project name - only a-z, A-Z, 0-9, _, - allowed
+    const name = newProjectName.trim()
+    if (!name) {
+      setNewProjectError('Project name is required')
+      return
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      setNewProjectError('Project name may only contain a-z, A-Z, 0-9, _, and -')
+      return
+    }
+
+    setIsCreatingProject(true)
+    setNewProjectError('')
+
     try {
+      // Check if xtool is installed
+      const xtoolInstalled = await invoke<boolean>('check_xtool_installed')
+      if (!xtoolInstalled) {
+        setNewProjectError('xtool is not installed. Please install xtool first.')
+        setIsCreatingProject(false)
+        return
+      }
+
       const parentDir = await invoke<string | null>('pick_folder')
-      if (!parentDir) return
-      const dirPath = `${parentDir.replace(/[/\\]+$/, '')}/${newProjectName.trim()}`
+      if (!parentDir) {
+        setIsCreatingProject(false)
+        return
+      }
+
+      // Run xtool new
+      const output = await invoke<string>('run_xtool_new', {
+        projectName: name,
+        parentDir,
+      })
+
+      // Wait for "Finished generating project" in output
+      if (!output.includes('Finished generating project')) {
+        setNewProjectError('Failed to generate project. Check xtool output.')
+        setIsCreatingProject(false)
+        return
+      }
+
+      // Extract project name from output to handle case changes
+      const match = output.match(/Finished generating project (\S+)/)
+      const finalProjectName = match ? match[1] : name
+
+      const dirPath = `${parentDir.replace(/[/\\]+$/, '')}/${finalProjectName}`
       setShowNewProjectDialog(false)
       setNewProjectName('')
-      requestProjectSwitch(dirPath, true)
+      setIsCreatingProject(false)
+
+      // Open the generated project
+      requestProjectSwitch(dirPath, false)
     } catch (e) {
       console.error('Failed to create project:', e)
+      setNewProjectError(e instanceof Error ? e.message : 'Failed to create project')
+      setIsCreatingProject(false)
     }
-  }, [newProjectName, requestProjectSwitch])
+  }, [newProjectName, requestProjectSwitch, isCreatingProject])
 
   const handleOpenProject = useCallback(async () => {
     try {
@@ -417,6 +498,28 @@ function App() {
     setNewFileName('')
   }, [])
 
+  const handleStartTerminal = useCallback(async () => {
+    if (!projectPath) return
+    try {
+      await invoke('start_terminal', { projectPath })
+      setIsTerminalRunning(true)
+      setBuildStatus('building')
+      setShowTerminal(true)
+    } catch (e) {
+      console.error('Failed to start terminal:', e)
+    }
+  }, [projectPath])
+
+  const handleStopTerminal = useCallback(async () => {
+    try {
+      await invoke('stop_terminal')
+      setIsTerminalRunning(false)
+      setBuildStatus('idle')
+    } catch (e) {
+      console.error('Failed to stop terminal:', e)
+    }
+  }, [])
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -430,6 +533,41 @@ function App() {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [activeTab, openTabs, saveFile])
+
+  // Listen for terminal output
+  useEffect(() => {
+    let unlisten: (() => void) | null = null
+
+    const setupListeners = async () => {
+      try {
+        unlisten = await listen('terminal-output', (event) => {
+          const { line, type } = event.payload as { line: string; type: string }
+          setTerminalOutput((prev) => [...prev, line])
+
+          // Check for build completion
+          if (line.includes('Wrote to') && line.includes('.ipa')) {
+            setBuildStatus('completed')
+            setIsTerminalRunning(false)
+          }
+        })
+
+        await listen('terminal-exited', () => {
+          setIsTerminalRunning(false)
+          if (buildStatus === 'building') {
+            setBuildStatus('failed')
+          }
+        })
+      } catch (e) {
+        console.error('Failed to setup terminal listeners:', e)
+      }
+    }
+
+    setupListeners()
+
+    return () => {
+      unlisten?.()
+    }
+  }, [buildStatus])
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -552,7 +690,22 @@ function App() {
         <div className="menu-item">Find</div>
         <div className="menu-item">Navigate</div>
         <div className="menu-item">Editor</div>
-        <div className="menu-item">Product</div>
+        <div
+          className="menu-item"
+          onClick={() => setMenuDropdown(menuDropdown === 'product' ? null : 'product')}
+        >
+          Product
+          {menuDropdown === 'product' && (
+            <div className="menu-dropdown">
+              <div className="menu-dropdown-item" onClick={handleStartTerminal}>
+                Build
+              </div>
+              <div className="menu-dropdown-item" onClick={() => setShowTerminal(!showTerminal)}>
+                Toggle Terminal
+              </div>
+            </div>
+          )}
+        </div>
         <div className="menu-item">Debug</div>
         <div className="menu-item">Source Control</div>
         <div className="menu-item">Window</div>
@@ -568,18 +721,36 @@ function App() {
           <button className="toolbar-btn"><ChevronLeft size={16} /></button>
           <button className="toolbar-btn"><ChevronRight size={16} /></button>
           <div className="separator"></div>
-          <button className="toolbar-btn run-btn"><Play size={14} /></button>
-          <button className="toolbar-btn stop-btn"><Square size={14} /></button>
+          <button
+            className="toolbar-btn run-btn"
+            onClick={isTerminalRunning ? null : handleStartTerminal}
+            disabled={!projectPath || isTerminalRunning}
+          >
+            <Play size={14} />
+          </button>
+          <button
+            className="toolbar-btn stop-btn"
+            onClick={isTerminalRunning ? handleStopTerminal : null}
+            disabled={!isTerminalRunning}
+          >
+            <Square size={14} />
+          </button>
           <div className="separator"></div>
           <div className="scheme-selector">
             <span className="scheme-name">{projectPath ? projectPath.split(/[/\\]/).pop() : 'No Project'}</span>
           </div>
         </div>
         <div className="toolbar-center">
-          <span className="build-status">{projectPath ? 'Project Loaded' : 'No Project Open'}</span>
+          <span className="build-status">
+            {buildStatus === 'building' && 'Building...'}
+            {buildStatus === 'completed' && 'Build Completed'}
+            {buildStatus === 'failed' && 'Build Failed'}
+            {buildStatus === 'idle' && (projectPath ? 'Ready' : 'No Project Open')}
+          </span>
         </div>
         <div className="toolbar-right">
           <button className="toolbar-btn" onClick={handleOpenProject}><Folder size={16} /></button>
+          <button className="toolbar-btn" onClick={() => setShowTerminal(!showTerminal)}><Terminal size={16} /></button>
           <button className="toolbar-btn"><Search size={16} /></button>
           <button className="toolbar-btn"><Settings size={16} /></button>
         </div>
@@ -693,6 +864,28 @@ function App() {
         </div>
       </div>
 
+      {/* Terminal Panel */}
+      {showTerminal && (
+        <div className="terminal-panel">
+          <div className="terminal-header">
+            <span className="terminal-title">Terminal</span>
+            <button className="terminal-close" onClick={() => setShowTerminal(false)}>
+              <X size={14} />
+            </button>
+          </div>
+          <div className="terminal-content">
+            {terminalOutput.length === 0 && (
+              <div className="terminal-empty">Terminal ready. Click Build to start.</div>
+            )}
+            {terminalOutput.map((line, index) => (
+              <div key={index} className="terminal-line">
+                {line}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* New Project Dialog */}
       {showNewProjectDialog && (
         <div className="dialog-overlay" onClick={() => setShowNewProjectDialog(false)}>
@@ -709,21 +902,29 @@ function App() {
                 id="project-name"
                 type="text"
                 value={newProjectName}
-                onChange={(e) => setNewProjectName(e.target.value)}
+                onChange={(e) => {
+                  // Auto-convert spaces to underscores
+                  const value = e.target.value.replace(/ /g, '_')
+                  setNewProjectName(value)
+                  setNewProjectError('')
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     handleNewProject()
                   }
                 }}
+                disabled={isCreatingProject}
                 autoFocus
               />
+              <div className="hint-text">Only a-z, A-Z, 0-9, _, and - are allowed</div>
+              {newProjectError && <div className="error-text">{newProjectError}</div>}
             </div>
             <div className="dialog-footer">
-              <button className="btn-secondary" onClick={() => setShowNewProjectDialog(false)}>
+              <button className="btn-secondary" onClick={() => setShowNewProjectDialog(false)} disabled={isCreatingProject}>
                 Cancel
               </button>
-              <button className="btn-primary" onClick={handleNewProject}>
-                Create
+              <button className="btn-primary" onClick={handleNewProject} disabled={isCreatingProject}>
+                {isCreatingProject ? 'Creating...' : 'Create'}
               </button>
             </div>
           </div>

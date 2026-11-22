@@ -68,6 +68,7 @@ export function CodeEditor({ value, onChange, onCursor, extensions = [], filePat
   const callbacksRef = useRef({ onChange, onCursor })
   const languageCompartment = useRef(new Compartment())
   const [languageExtension, setLanguageExtension] = useState<Extension[]>([])
+  const isInitialLoadRef = useRef(true)
   callbacksRef.current = { onChange, onCursor }
 
   useEffect(() => {
@@ -116,7 +117,7 @@ export function CodeEditor({ value, onChange, onCursor, extensions = [], filePat
           syntaxHighlighting(xideHighlight),
           EditorView.lineWrapping,
           EditorView.updateListener.of((update) => {
-            if (update.docChanged) {
+            if (update.docChanged && !isInitialLoadRef.current) {
               callbacksRef.current.onChange?.(update.state.doc.toString())
             }
             if (update.docChanged || update.selectionSet) {
@@ -148,11 +149,16 @@ export function CodeEditor({ value, onChange, onCursor, extensions = [], filePat
     if (!view) return
     if (filePath !== prevFilePathRef.current) {
       prevFilePathRef.current = filePath
+      isInitialLoadRef.current = true
       const current = view.state.doc.toString()
       view.dispatch({
         changes: { from: 0, to: current.length, insert: value },
         annotations: [Transaction.addToHistory.of(false)],
       })
+      // Mark initial load as complete after a brief delay
+      setTimeout(() => {
+        isInitialLoadRef.current = false
+      }, 0)
     } else {
       const current = view.state.doc.toString()
       if (value !== current) {
